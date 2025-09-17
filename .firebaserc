@@ -1,0 +1,16 @@
+{
+  "projects": {
+    "default": "idoso-ms"
+  },
+  "targets": {
+    "idoso-ms": {
+      "hosting": {
+        "production": [
+          "idoso-ms"
+        ]
+      }
+    }
+  },
+  "etags": {},
+  "dataconnectEmulatorConfig": {}
+}
