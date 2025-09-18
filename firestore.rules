@@ -1,251 +1,96 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    
-    // Funções auxiliares
-    function isSignedIn() { 
-      return request.auth != null; 
+    // Função auxiliar para verificar se o usuário está autenticado via Firebase Auth
+    // Como usamos CPF + senha customizada, vamos verificar pela existência do documento do usuário
+    function isAuthenticated() {
+      return request.auth != null;
     }
     
-    function getUserRole() { 
-      return request.auth.token.role;
+    // Função para obter dados do usuário logado
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
     }
     
-    function getUserId() { 
-      return request.auth.uid; 
+    // Função para verificar se o usuário pertence ao mesmo município
+    function sameMunicipality(resourceData) {
+      return getUserData().municipio == resourceData.municipio;
     }
     
-    function getUserMunicipio() { 
-      return request.auth.token.ibge_municipio; 
+    // Função para verificar papel/role do usuário
+    function hasRole(role) {
+      return getUserData().role == role;
     }
     
-    function getUserEquipes() {
-      return request.auth.token.equipes != null ? request.auth.token.equipes : [];
+    // Função para verificar se tem um dos papéis especificados
+    function hasAnyRole(roles) {
+      return getUserData().role in roles;
     }
     
-    function isSuperAdmin() {
-      return getUserRole() == 'superadmin';
-    }
-    
-    function isAdmin() {
-      return getUserRole() in ['superadmin', 'admin'];
-    }
-    
-    function isCoordMunicipal() {
-      return getUserRole() in ['superadmin', 'admin', 'coord'];
-    }
-    
-    function canManageUsers() {
-      return getUserRole() in ['superadmin', 'admin', 'coord'];
-    }
-    
-    function canCreateData() {
-      return getUserRole() in ['superadmin', 'admin', 'coord', 'agente'];
-    }
-    
-    function isSameMunicipio(municipioData) {
-      return getUserMunicipio() == municipioData || isAdmin();
-    }
-
-    // === USUÁRIOS ===
+    // Regras para coleção de usuários
     match /users/{userId} {
-      allow read: if isSignedIn() && (
-        userId == getUserId() || 
-        isAdmin() ||
-        (isCoordMunicipal() && resource.data.ibge_municipio == getUserMunicipio())
-      );
+      // Usuários podem ler apenas seus próprios dados
+      allow read: if isAuthenticated() && request.auth.uid == userId;
       
-      allow create: if isSignedIn() && canManageUsers() && (
-        isAdmin() || 
-        (getUserRole() == 'coord' && request.resource.data.ibge_municipio == getUserMunicipio())
-      );
+      // Apenas admins podem criar/atualizar usuários
+      allow create, update: if isAuthenticated() && hasRole('admin');
       
-      allow update: if isSignedIn() && (
-        userId == getUserId() ||
-        isAdmin() ||
-        (isCoordMunicipal() && resource.data.ibge_municipio == getUserMunicipio())
-      );
+      // Usuários não podem alterar seu próprio role
+      allow update: if isAuthenticated() && 
+                   request.auth.uid == userId && 
+                   !('role' in request.resource.data.diff(resource.data).affectedKeys());
       
-      allow delete: if isSignedIn() && (
-        isSuperAdmin() ||
-        (getUserRole() == 'admin' && resource.data.role != 'superadmin')
-      );
-      
-      allow list: if isSignedIn() && (
-        isAdmin() ||
-        (getUserRole() == 'coord')
-      );
+      // Ninguém pode deletar usuários
+      allow delete: if false;
     }
-
-    // === MUNICÍPIOS ===
-    match /municipios/{ibgeCode} {
-      allow read: if true; // Dados públicos
-      allow write: if isSignedIn() && isAdmin();
-      allow list: if true; // Lista pública para seleção
-    }
-
-    // === PACIENTES ===
+    
+    // Regras para coleção de pacientes
     match /pacientes/{pacienteId} {
-      allow read: if isSignedIn() && (
-        isAdmin() ||
-        isSameMunicipio(resource.data.ibge_municipio)
-      );
+      // Usuários podem ler pacientes do mesmo município
+      allow read: if isAuthenticated() && sameMunicipality(resource.data);
       
-      allow create: if isSignedIn() && canCreateData() && (
-        isAdmin() ||
-        request.resource.data.ibge_municipio == getUserMunicipio()
-      ) && validatePacienteData();
+      // Agentes, coordenadores, gerentes e admins podem criar pacientes
+      allow create: if isAuthenticated() && 
+                   hasAnyRole(['agente', 'coordenador', 'gerente', 'admin']) &&
+                   request.resource.data.municipio == getUserData().municipio;
       
-      allow update: if isSignedIn() && (
-        isAdmin() ||
-        (isCoordMunicipal() && resource.data.ibge_municipio == getUserMunicipio()) ||
-        (getUserRole() == 'agente' && resource.data.createdBy == getUserId())
-      ) && validatePacienteData();
+      // Apenas coordenadores, gerentes e admins podem atualizar
+      allow update: if isAuthenticated() && 
+                   hasAnyRole(['coordenador', 'gerente', 'admin']) &&
+                   sameMunicipality(resource.data);
       
-      allow delete: if isSignedIn() && (
-        isSuperAdmin() ||
-        (getUserRole() == 'admin') ||
-        (getUserRole() == 'coord' && resource.data.ibge_municipio == getUserMunicipio())
-      );
-      
-      allow list: if isSignedIn() && (
-        isAdmin() ||
-        request.query.where('ibge_municipio', '==', getUserMunicipio())
-      );
-      
-      function validatePacienteData() {
-        let data = request.resource.data;
-        return data.keys().hasAll(['nome', 'ibge_municipio', 'createdBy', 'createdAt']) &&
-               data.nome is string && data.nome.size() > 0 &&
-               data.ibge_municipio is string &&
-               data.createdBy is string &&
-               data.createdAt is timestamp;
-      }
+      // Apenas admins podem deletar pacientes
+      allow delete: if isAuthenticated() && hasRole('admin');
     }
-
-    // === AVALIAÇÕES ===
+    
+    // Regras para coleção de avaliações
     match /avaliacoes/{avaliacaoId} {
-      allow read: if isSignedIn() && (
-        isAdmin() ||
-        isSameMunicipio(resource.data.ibge_municipio)
-      );
+      // Usuários podem ler avaliações do mesmo município
+      allow read: if isAuthenticated() && sameMunicipality(resource.data);
       
-      allow create: if isSignedIn() && canCreateData() && (
-        isAdmin() ||
-        request.resource.data.ibge_municipio == getUserMunicipio()
-      ) && validateAvaliacaoData();
+      // Agentes podem criar avaliações
+      allow create: if isAuthenticated() && 
+                   hasAnyRole(['agente', 'coordenador', 'gerente', 'admin']) &&
+                   request.resource.data.municipio == getUserData().municipio &&
+                   request.resource.data.profissional == getUserData().cpf;
       
-      allow update: if isSignedIn() && (
-        isAdmin() ||
-        (isCoordMunicipal() && resource.data.ibge_municipio == getUserMunicipio()) ||
-        (getUserRole() == 'agente' && resource.data.profissionalUid == getUserId())
-      ) && validateAvaliacaoData();
+      // Coordenadores, gerentes e admins podem atualizar (aprovar/rejeitar)
+      allow update: if isAuthenticated() && 
+                   hasAnyRole(['coordenador', 'gerente', 'admin']) &&
+                   sameMunicipality(resource.data);
       
-      allow delete: if isSignedIn() && (
-        isSuperAdmin() ||
-        (getUserRole() == 'admin') ||
-        (getUserRole() == 'coord' && resource.data.ibge_municipio == getUserMunicipio())
-      );
+      // Profissionais podem atualizar suas próprias avaliações (apenas se status = pendente)
+      allow update: if isAuthenticated() && 
+                   resource.data.profissional == getUserData().cpf &&
+                   resource.data.status == 'pendente';
       
-      allow list: if isSignedIn() && (
-        isAdmin() ||
-        request.query.where('ibge_municipio', '==', getUserMunicipio())
-      );
-      
-      function validateAvaliacaoData() {
-        let data = request.resource.data;
-        return data.keys().hasAll(['pacienteId', 'tipo', 'respostas', 'escore_total', 'risco', 'ibge_municipio', 'profissionalUid', 'dataAvaliacao', 'createdAt']) &&
-               data.pacienteId is string &&
-               data.tipo in ['IVCF20', 'IVSF10'] &&
-               data.respostas is map &&
-               data.escore_total is number &&
-               data.risco in ['baixo', 'moderado', 'alto'] &&
-               data.ibge_municipio is string &&
-               data.profissionalUid is string &&
-               data.dataAvaliacao is timestamp &&
-               data.createdAt is timestamp;
-      }
+      // Apenas admins podem deletar avaliações
+      allow delete: if isAuthenticated() && hasRole('admin');
     }
-
-    // === PARÂMETROS DO SISTEMA ===
-    match /parametros/{parametroId} {
-      allow read: if true; // Parâmetros públicos (faixas de risco, etc.)
-      allow write: if isSignedIn() && isAdmin();
-    }
-
-    // === EQUIPES/INE ===
-    match /equipes/{equipeId} {
-      allow read: if isSignedIn() && (
-        isAdmin() ||
-        equipeId in getUserEquipes() ||
-        resource.data.ibge_municipio == getUserMunicipio()
-      );
-      
-      allow create, update: if isSignedIn() && (
-        isAdmin() ||
-        (isCoordMunicipal() && request.resource.data.ibge_municipio == getUserMunicipio())
-      );
-      
-      allow delete: if isSignedIn() && isAdmin();
-      
-      allow list: if isSignedIn() && (
-        isAdmin() ||
-        getUserMunicipio() != null
-      );
-    }
-
-    // === UNIDADES/CNES ===
-    match /unidades/{unidadeId} {
-      allow read: if isSignedIn() && (
-        isAdmin() ||
-        resource.data.ibge_municipio == getUserMunicipio()
-      );
-      
-      allow create, update: if isSignedIn() && (
-        isAdmin() ||
-        (isCoordMunicipal() && request.resource.data.ibge_municipio == getUserMunicipio())
-      );
-      
-      allow delete: if isSignedIn() && isAdmin();
-      
-      allow list: if isSignedIn() && (
-        isAdmin() ||
-        getUserMunicipio() != null
-      );
-    }
-
-    // === LOGS/AUDITORIA ===
-    match /logs/{logId} {
-      allow read: if isSignedIn() && isAdmin();
-      allow create: if isSignedIn(); // Qualquer usuário pode criar logs
-      allow list: if isSignedIn() && isAdmin();
-      // Logs nunca são atualizados ou deletados
-    }
-
-    // === RELATÓRIOS/EXPORTS ===
-    match /exports/{exportId} {
-      allow read, delete: if isSignedIn() && (
-        resource.data.createdBy == getUserId() ||
-        isAdmin() ||
-        (isCoordMunicipal() && resource.data.ibge_municipio == getUserMunicipio())
-      );
-      
-      allow create: if isSignedIn() && canCreateData();
-      
-      allow list: if isSignedIn() && (
-        isAdmin() ||
-        getUserMunicipio() != null
-      );
-    }
-
-    // === CONFIGURAÇÕES GLOBAIS ===
-    match /config/{configId} {
-      allow read: if isSignedIn();
-      allow write: if isSignedIn() && isSuperAdmin();
-    }
-
-    // Negar acesso a qualquer outra coleção não especificada
+    
+    // Regras para outras coleções (caso necessário no futuro)
     match /{document=**} {
+      // Por padrão, negar acesso a qualquer outra coleção
       allow read, write: if false;
     }
   }
